@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase-browser';
 import EdgeScore from '@/components/EdgeScore';
 import TierBadge from '@/components/TierBadge';
 import StatusBadge from '@/components/StatusBadge';
-import { Copy, Check, Send, Clock } from 'lucide-react';
+import { Copy, Check, Send, Clock, Mail, ExternalLink, AtSign } from 'lucide-react';
 
 export default function MessagesPage() {
   const supabase = createClient();
@@ -13,6 +13,7 @@ export default function MessagesPage() {
   const [allMessages, setAllMessages] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
   const [filter, setFilter] = useState<'queue' | 'all' | 'sent'>('queue');
 
   useEffect(() => {
@@ -22,13 +23,36 @@ export default function MessagesPage() {
   const fetchData = async () => {
     setLoading(true);
 
+    // Fetch queue with contact email info
     const { data: queueData } = await supabase
       .from('outreach_queue')
       .select('*');
 
+    // Also fetch contact emails for queue items
+    if (queueData && queueData.length > 0) {
+      // Get contact info for each queue item via the message's contact
+      const { data: messagesWithContacts } = await supabase
+        .from('messages')
+        .select('id, contact_id, contacts:contact_id (email, full_name)')
+        .in('id', queueData.map((q: any) => q.message_id));
+
+      // Build a lookup of message_id -> email
+      const emailLookup: Record<string, string> = {};
+      (messagesWithContacts || []).forEach((m: any) => {
+        if (m.contacts?.email) {
+          emailLookup[m.id] = m.contacts.email;
+        }
+      });
+
+      // Attach emails to queue items
+      queueData.forEach((item: any) => {
+        item.contact_email = emailLookup[item.message_id] || null;
+      });
+    }
+
     const { data: messagesData } = await supabase
       .from('messages')
-      .select('*, contacts:contact_id (full_name, linkedin_url, accounts:account_id (org_name))')
+      .select('*, contacts:contact_id (full_name, linkedin_url, email, accounts:account_id (org_name))')
       .order('created_at', { ascending: false });
 
     setQueue(queueData || []);
@@ -36,10 +60,11 @@ export default function MessagesPage() {
     setLoading(false);
   };
 
-  const copyMessage = async (id: string, body: string) => {
-    await navigator.clipboard.writeText(body);
+  const copyToClipboard = async (id: string, text: string, field: string) => {
+    await navigator.clipboard.writeText(text);
     setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+    setCopiedField(field);
+    setTimeout(() => { setCopiedId(null); setCopiedField(null); }, 2000);
   };
 
   const updateMessageStatus = async (id: string, status: string) => {
@@ -51,9 +76,26 @@ export default function MessagesPage() {
     fetchData();
   };
 
-  const openLinkedIn = (url: string, messageId: string, body: string) => {
-    copyMessage(messageId, body);
-    window.open(url, '_blank');
+  // Generate email subject line from context
+  const generateSubject = (item: any) => {
+    const position = item.sequence_position || 1;
+    const orgName = item.org_name || '';
+    
+    if (position === 1) {
+      return `Video operations at ${orgName} — a thought`;
+    } else if (position === 2) {
+      return `Re: Video operations at ${orgName}`;
+    } else {
+      return `Following up — ${orgName} video continuity`;
+    }
+  };
+
+  // Open mailto link
+  const openMailto = (email: string, subject: string, body: string, messageId: string) => {
+    const mailto = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.open(mailto, '_blank');
+    // Auto-copy body as well
+    copyToClipboard(messageId, body, 'body');
   };
 
   const sentMessages = allMessages.filter((m) => m.status === 'sent' || m.status === 'replied');
@@ -70,7 +112,7 @@ export default function MessagesPage() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="font-display text-2xl text-edge-100">Messages</h1>
-          <p className="text-edge-500 text-sm mt-1">Outreach queue and message history</p>
+          <p className="text-edge-500 text-sm mt-1">Email outreach queue and message history</p>
         </div>
       </div>
 
@@ -108,73 +150,157 @@ export default function MessagesPage() {
           </div>
         ) : (
           <div className="space-y-3">
-            {queue.map((item) => (
-              <div key={item.message_id} className="card p-5">
-                <div className="flex items-center gap-3 mb-3">
-                  <EdgeScore score={item.edge_score} size="sm" />
-                  <TierBadge tier={item.priority_tier} />
-                  <span className="text-edge-100 font-medium">{item.full_name}</span>
-                  <span className="text-edge-600">·</span>
-                  <span className="text-edge-500 text-sm">{item.org_name}</span>
-                  <span className="text-edge-600">·</span>
-                  <span className="text-xs text-edge-500">
-                    {sequenceLabels[item.sequence_position] || `#${item.sequence_position}`}
-                  </span>
-                  <StatusBadge status={item.message_status} />
-                  {item.follow_up_due && (
-                    <span className="flex items-center gap-1 text-xs text-amber-400">
-                      <Clock size={12} />
-                      Due {item.follow_up_due}
+            {queue.map((item) => {
+              const subject = generateSubject(item);
+              const hasEmail = !!item.contact_email;
+
+              return (
+                <div key={item.message_id} className="card p-5">
+                  {/* Header row */}
+                  <div className="flex items-center gap-3 mb-3">
+                    <EdgeScore score={item.edge_score} size="sm" />
+                    <TierBadge tier={item.priority_tier} />
+                    <span className="text-edge-100 font-medium">{item.full_name}</span>
+                    <span className="text-edge-600">·</span>
+                    <span className="text-edge-500 text-sm">{item.org_name}</span>
+                    <span className="text-edge-600">·</span>
+                    <span className="text-xs text-edge-500">
+                      {sequenceLabels[item.sequence_position] || `#${item.sequence_position}`}
                     </span>
-                  )}
-                </div>
+                    <StatusBadge status={item.message_status} />
+                    {item.follow_up_due && (
+                      <span className="flex items-center gap-1 text-xs text-amber-400">
+                        <Clock size={12} />
+                        Due {item.follow_up_due}
+                      </span>
+                    )}
+                  </div>
 
-                <div className="bg-edge-950/50 rounded-md p-4 mb-3 border border-edge-800/30">
-                  <p className="text-sm text-edge-300 leading-relaxed whitespace-pre-wrap">
-                    {item.message_body}
-                  </p>
-                </div>
+                  {/* Email recipient */}
+                  <div className="flex items-center gap-2 mb-3 px-4 py-2 rounded-md bg-edge-950/50 border border-edge-800/30">
+                    <AtSign size={13} className={hasEmail ? 'text-green-400' : 'text-edge-600'} />
+                    {hasEmail ? (
+                      <span className="text-sm text-green-400 font-mono">{item.contact_email}</span>
+                    ) : (
+                      <span className="text-sm text-edge-600 italic">No email — enrich this contact in the Contacts tab</span>
+                    )}
+                    {hasEmail && (
+                      <button
+                        onClick={() => copyToClipboard(item.message_id, item.contact_email, 'email')}
+                        className="ml-auto text-edge-500 hover:text-edge-300 transition-colors"
+                        title="Copy email"
+                      >
+                        {copiedId === item.message_id && copiedField === 'email' ? (
+                          <Check size={13} className="text-green-400" />
+                        ) : (
+                          <Copy size={13} />
+                        )}
+                      </button>
+                    )}
+                  </div>
 
-                <div className="flex items-center gap-2 justify-end">
-                  <button
-                    onClick={() => copyMessage(item.message_id, item.message_body)}
-                    className="btn-secondary flex items-center gap-2 text-xs"
-                  >
-                    {copiedId === item.message_id ? <Check size={13} /> : <Copy size={13} />}
-                    {copiedId === item.message_id ? 'Copied' : 'Copy'}
-                  </button>
-
-                  {item.message_status === 'drafted' && (
+                  {/* Subject line */}
+                  <div className="flex items-center gap-2 mb-2 px-4 py-2 rounded-md bg-edge-950/30 border border-edge-800/20">
+                    <span className="text-[10px] text-edge-600 uppercase tracking-wider shrink-0">Subject</span>
+                    <span className="text-sm text-edge-300 flex-1">{subject}</span>
                     <button
-                      onClick={() => updateMessageStatus(item.message_id, 'approved')}
+                      onClick={() => copyToClipboard(item.message_id + '-subj', subject, 'subject')}
+                      className="text-edge-500 hover:text-edge-300 transition-colors shrink-0"
+                      title="Copy subject"
+                    >
+                      {copiedId === item.message_id + '-subj' && copiedField === 'subject' ? (
+                        <Check size={13} className="text-green-400" />
+                      ) : (
+                        <Copy size={13} />
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Message body */}
+                  <div className="bg-edge-950/50 rounded-md p-4 mb-3 border border-edge-800/30">
+                    <p className="text-sm text-edge-300 leading-relaxed whitespace-pre-wrap">
+                      {item.message_body}
+                    </p>
+                  </div>
+
+                  {/* Action buttons */}
+                  <div className="flex items-center gap-2 justify-end">
+                    {/* Copy body */}
+                    <button
+                      onClick={() => copyToClipboard(item.message_id, item.message_body, 'body')}
                       className="btn-secondary flex items-center gap-2 text-xs"
                     >
-                      Approve
+                      {copiedId === item.message_id && copiedField === 'body' ? <Check size={13} /> : <Copy size={13} />}
+                      {copiedId === item.message_id && copiedField === 'body' ? 'Copied' : 'Copy Message'}
                     </button>
-                  )}
 
-                  {item.linkedin_url && item.message_status === 'approved' && (
-                    <button
-                      onClick={() => openLinkedIn(item.linkedin_url, item.message_id, item.message_body)}
-                      className="btn-primary flex items-center gap-2 text-xs"
-                    >
-                      <Send size={13} />
-                      Copy & Open LinkedIn
-                    </button>
-                  )}
+                    {/* Copy all (email + subject + body) */}
+                    {hasEmail && (
+                      <button
+                        onClick={() => {
+                          const fullText = `To: ${item.contact_email}\nSubject: ${subject}\n\n${item.message_body}`;
+                          copyToClipboard(item.message_id + '-all', fullText, 'all');
+                        }}
+                        className="btn-secondary flex items-center gap-2 text-xs"
+                      >
+                        {copiedId === item.message_id + '-all' && copiedField === 'all' ? (
+                          <Check size={13} className="text-green-400" />
+                        ) : (
+                          <Mail size={13} />
+                        )}
+                        {copiedId === item.message_id + '-all' && copiedField === 'all' ? 'Copied All' : 'Copy Full Email'}
+                      </button>
+                    )}
 
-                  {item.message_status === 'approved' && (
-                    <button
-                      onClick={() => updateMessageStatus(item.message_id, 'sent')}
-                      className="btn-secondary flex items-center gap-2 text-xs text-green-400"
-                    >
-                      <Check size={13} />
-                      Mark Sent
-                    </button>
-                  )}
+                    {/* Approve */}
+                    {item.message_status === 'drafted' && (
+                      <button
+                        onClick={() => updateMessageStatus(item.message_id, 'approved')}
+                        className="btn-secondary flex items-center gap-2 text-xs"
+                      >
+                        Approve
+                      </button>
+                    )}
+
+                    {/* Open in mail client */}
+                    {hasEmail && item.message_status === 'approved' && (
+                      <button
+                        onClick={() => openMailto(item.contact_email, subject, item.message_body, item.message_id)}
+                        className="btn-primary flex items-center gap-2 text-xs"
+                      >
+                        <Send size={13} />
+                        Open in Mail
+                      </button>
+                    )}
+
+                    {/* Fallback: Open LinkedIn if no email but has LinkedIn */}
+                    {!hasEmail && item.linkedin_url && item.message_status === 'approved' && (
+                      <button
+                        onClick={() => {
+                          copyToClipboard(item.message_id, item.message_body, 'body');
+                          window.open(item.linkedin_url, '_blank');
+                        }}
+                        className="btn-secondary flex items-center gap-2 text-xs"
+                      >
+                        <ExternalLink size={13} />
+                        Copy & Open LinkedIn
+                      </button>
+                    )}
+
+                    {/* Mark sent */}
+                    {item.message_status === 'approved' && (
+                      <button
+                        onClick={() => updateMessageStatus(item.message_id, 'sent')}
+                        className="btn-secondary flex items-center gap-2 text-xs text-green-400"
+                      >
+                        <Check size={13} />
+                        Mark Sent
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )
       ) : (
@@ -190,6 +316,15 @@ export default function MessagesPage() {
                 <span className="text-xs text-edge-500">
                   {msg.contacts?.accounts?.org_name}
                 </span>
+                {msg.contacts?.email && (
+                  <>
+                    <span className="text-edge-600">·</span>
+                    <span className="flex items-center gap-1 text-xs text-green-400">
+                      <Mail size={11} />
+                      {msg.contacts.email}
+                    </span>
+                  </>
+                )}
                 <span className="text-xs text-edge-600">
                   {sequenceLabels[msg.sequence_position]}
                 </span>
